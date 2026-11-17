@@ -109,14 +109,18 @@ if uci -q get 'wireless.@wifi-device[0]' >/dev/null 2>&1; then
 	uci commit wireless
 fi
 
-# ---------------- 界面：中文 + footstrap 主题 ----------------
+# ---------------- 界面：中文 + argon 主题 ----------------
 # 语言包（luci-i18n-*-zh-cn）已编进固件，这里把默认语言固定下来，
 # 不依赖浏览器的 Accept-Language。
 uci set luci.main.lang='zh_cn'
-# footstrap：左侧可折叠栏 + 亮暗两套配色 + 菜单搜索，比默认 bootstrap 好用。
-# 想换回来就改成 /luci-static/bootstrap（bootstrap / bootstrap-dark / bootstrap-light 都在）。
-uci set luci.main.mediaurlbase='/luci-static/footstrap'
+# argon：左侧菜单栏那套。整套文件（www 静态资源 + ucode 模板 + rpcd 脚本）
+# 都塞在固件 files/ 里，直接进 squashfs，不占 overlay。
+# 想换回官方样式就改成 /luci-static/bootstrap。
+uci set luci.main.mediaurlbase='/luci-static/argon'
+uci set luci.themes.Argon='/luci-static/argon'
 uci commit luci
+# argon 的 rpcd 后端要重新注册才认得，否则主题设置页读不到参数
+/etc/init.d/rpcd restart >/dev/null 2>&1
 
 # ---------------- 软件源换国内镜像 ----------------
 # 只换域名，路径和 kmods 的 kernel 版本号保持原样。官方源在国内拉包太慢。

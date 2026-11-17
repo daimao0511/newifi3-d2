@@ -1,0 +1,4 @@
+{
+  "primary": "https://luci-theme-argon.pages.dev/updates/stable.json",
+  "fallback": "https://jerrykuku.github.io/luci-theme-argon/updates/stable.json"
+}
