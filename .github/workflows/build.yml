@@ -18,7 +18,9 @@ env:
   # 固定到 tag svn1113 的 commit，不跟 master 飘
   VLMCSD_COMMIT: 'e599080486478e219cd065e141d6de050a450c27'
   PKGS: >-
-    luci-ssl curl ca-bundle
+    luci-ssl luci-theme-footstrap
+    luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn
+    curl ca-bundle
     -wpad-basic-mbedtls
     -kmod-mt7603 -kmod-mt76x2 -kmod-mac80211 -kmod-cfg80211
     -kmod-usb3 -kmod-usb-ledtrig-usbport
@@ -189,7 +191,10 @@ jobs:
           echo "ROOT=$ROOT"
           echo "--- 必须存在 ---"
           for p in usr/bin/vlmcsd etc/init.d/vlmcsd etc/init.d/proxy-mipsle \
-                   etc/uci-defaults/99-newifi-custom usr/bin/curl; do
+                   etc/uci-defaults/99-newifi-custom usr/bin/curl \
+                   usr/lib/lua/luci/i18n/base.zh-cn.lmo \
+                   usr/lib/lua/luci/i18n/firewall.zh-cn.lmo \
+                   www/luci-static/footstrap/cascade.css; do
             test -e "$ROOT/$p" && echo "OK   $p" || { echo "!! 缺 $p"; exit 1; }
           done
           if test -e "$ROOT/etc/vlmcsd.kmd"; then echo "!! 多带了 vlmcsd.kmd"; exit 1; fi

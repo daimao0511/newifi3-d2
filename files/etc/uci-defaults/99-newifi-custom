@@ -109,11 +109,21 @@ if uci -q get 'wireless.@wifi-device[0]' >/dev/null 2>&1; then
 	uci commit wireless
 fi
 
+# ---------------- 界面：中文 + footstrap 主题 ----------------
+# 语言包（luci-i18n-*-zh-cn）已编进固件，这里把默认语言固定下来，
+# 不依赖浏览器的 Accept-Language。
+uci set luci.main.lang='zh_cn'
+# footstrap：左侧可折叠栏 + 亮暗两套配色 + 菜单搜索，比默认 bootstrap 好用。
+# 想换回来就改成 /luci-static/bootstrap（bootstrap / bootstrap-dark / bootstrap-light 都在）。
+uci set luci.main.mediaurlbase='/luci-static/footstrap'
+uci commit luci
+
 # ---------------- 软件源换国内镜像 ----------------
 # 只换域名，路径和 kmods 的 kernel 版本号保持原样。官方源在国内拉包太慢。
-if [ -f /etc/apk/repositories ]; then
-	sed -i 's#https://downloads.openwrt.org#https://mirrors.ustc.edu.cn/openwrt#' /etc/apk/repositories
-fi
+# 25.12 是 apk，源清单在 /etc/apk/repositories.d/*.list，不是 /etc/apk/repositories
+for f in /etc/apk/repositories /etc/apk/repositories.d/*.list; do
+	[ -f "$f" ] && sed -i 's#https://downloads.openwrt.org#https://mirrors.ustc.edu.cn/openwrt#' "$f"
+done
 # 24.10 及更早用的是 opkg
 if [ -f /etc/opkg/distfeeds.conf ]; then
 	sed -i 's#https://downloads.openwrt.org#https://mirrors.ustc.edu.cn/openwrt#' /etc/opkg/distfeeds.conf
