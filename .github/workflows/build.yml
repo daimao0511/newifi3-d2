@@ -56,155 +56,154 @@ jobs:
 
       - name: 下载 OpenWrt SDK（要里面的 musl 交叉工具链）
         run: |
-          set -eux
-          {
-            URL="https://downloads.openwrt.org/releases/${OWRT_VER}/targets/${TARGET}/${SUBTARGET}/${SDK}.tar.zst"
-            echo "GET $URL"
-            wget -q "$URL"
-            tar --zstd -xf "${SDK}.tar.zst"
-            ls -d "${SDK}"/staging_dir/*/
-          } 2>&1 | tee -a /tmp/build.log
+          set -euxo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
+          URL="https://downloads.openwrt.org/releases/${OWRT_VER}/targets/${TARGET}/${SUBTARGET}/${SDK}.tar.zst"
+          echo "GET $URL"
+          wget -q "$URL"
+          tar --zstd -xf "${SDK}.tar.zst"
+          ls -d "${SDK}"/staging_dir/*/
 
       - name: 交叉编译 vlmcsd（KMS 激活服务）
         run: |
           set -euxo pipefail
-          {
-            TOOLCHAIN=$(find "${SDK}/staging_dir" -maxdepth 1 -type d -name 'toolchain-*' | head -1)
-            test -n "$TOOLCHAIN"
-            CC=$(ls "$TOOLCHAIN"/bin/*-openwrt-linux-musl-gcc | head -1)
-            echo "TOOLCHAIN=$TOOLCHAIN"
-            echo "CC=$CC"
-            "$CC" -dumpmachine
-            "$CC" -v 2>&1 | grep -E '^Target:|^gcc version' || true
+          exec > >(tee -a /tmp/build.log) 2>&1
 
-            # 上游源码，按 tag 拉，落到固定 commit 才继续
-            rm -rf /tmp/vlmcsd-src && mkdir -p /tmp/vlmcsd-src
-            git -C /tmp/vlmcsd-src init -q
-            git -C /tmp/vlmcsd-src remote add origin "$VLMCSD_REPO"
-            git -C /tmp/vlmcsd-src fetch -q --depth 1 origin refs/tags/svn1113
-            git -C /tmp/vlmcsd-src checkout -q FETCH_HEAD
-            test "$(git -C /tmp/vlmcsd-src rev-parse HEAD)" = "$VLMCSD_COMMIT"
-            git -C /tmp/vlmcsd-src log --oneline -1
+          TOOLCHAIN=$(find "${SDK}/staging_dir" -maxdepth 1 -type d -name 'toolchain-*' | head -1)
+          test -n "$TOOLCHAIN"
+          CC=$(ls "$TOOLCHAIN"/bin/*-openwrt-linux-musl-gcc | head -1)
+          echo "TOOLCHAIN=$TOOLCHAIN"
+          echo "CC=$CC"
+          "$CC" -dumpmachine
+          "$CC" -v 2>&1 | grep -E '^Target:|^gcc version' || true
 
-            # 不用它的 GNUmakefile，直接列源码编译，参数与上游 BASECFLAGS 对齐：
-            #   _CRYPTO_INTERNAL   —— 用自带 AES，不依赖 openssl
-            #   FULL_INTERNAL_DATA —— 把 15085 字节的完整 KMS 数据编进二进制，
-            #                          这样运行时不需要 /etc/vlmcsd.kmd
-            cd /tmp/vlmcsd-src/src
-            "$CC" -Os -fno-strict-aliasing -fomit-frame-pointer \
-              -ffunction-sections -fdata-sections -Wall \
-              -D_CRYPTO_INTERNAL -DFULL_INTERNAL_DATA \
-              -o /tmp/vlmcsd.out \
-              vlmcsd.c kmsdata.c crypto.c crypto_internal.c kms.c endian.c \
-              output.c shared_globals.c helpers.c network.c rpc.c \
-              -Wl,--gc-sections -Wl,-s
+          # 上游源码，按 tag 拉，落到固定 commit 才继续
+          rm -rf /tmp/vlmcsd-src && mkdir -p /tmp/vlmcsd-src
+          git -C /tmp/vlmcsd-src init -q
+          git -C /tmp/vlmcsd-src remote add origin "$VLMCSD_REPO"
+          git -C /tmp/vlmcsd-src fetch -q --depth 1 origin refs/tags/svn1113
+          git -C /tmp/vlmcsd-src checkout -q FETCH_HEAD
+          test "$(git -C /tmp/vlmcsd-src rev-parse HEAD)" = "$VLMCSD_COMMIT"
+          git -C /tmp/vlmcsd-src log --oneline -1
 
-            ls -l /tmp/vlmcsd.out
-            file /tmp/vlmcsd.out
+          # 不用它的 GNUmakefile（BSD make 语法，GNU make 进去会去调 gmake）：
+          # 直接列源码调交叉 gcc，参数对齐上游 BASECFLAGS
+          #   _CRYPTO_INTERNAL     自带 AES，不链接 openssl
+          #   FULL_INTERNAL_DATA   把 15085 字节完整 KMS 数据编进去，运行时不需要 vlmcsd.kmd
+          cd /tmp/vlmcsd-src/src
+          "$CC" -Os -fno-strict-aliasing -fomit-frame-pointer \
+            -ffunction-sections -fdata-sections -Wall \
+            -D_CRYPTO_INTERNAL -DFULL_INTERNAL_DATA \
+            -o /tmp/vlmcsd.out \
+            vlmcsd.c kmsdata.c crypto.c crypto_internal.c kms.c endian.c \
+            output.c shared_globals.c helpers.c network.c rpc.c \
+            -Wl,--gc-sections -Wl,-s
 
-            # 硬校验：ELF 目标要对、必须是 mipsel 小端、KMS 数据确实内嵌
-            python3 - <<'PY'
-            import struct
+          ls -l /tmp/vlmcsd.out
+          file /tmp/vlmcsd.out
 
-            b = open('/tmp/vlmcsd.out', 'rb').read()
-            assert b[:4] == b'\x7fELF', 'not ELF'
-            assert b[4] == 1, 'not ELF32'
-            assert b[5] == 1, 'not little-endian'
-            e_type, e_machine = struct.unpack_from('<HH', b, 16)
-            assert e_type == 2, 'not executable'
-            assert e_machine == 8, 'not MIPS'
+      - name: 校验 vlmcsd 二进制（ELF 目标 / KMS 数据内嵌）
+        run: |
+          set -euo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
 
-            phoff, = struct.unpack_from('<I', b, 28)
-            phentsize, phnum = struct.unpack_from('<HH', b, 42)
-            interp = None
-            for i in range(phnum):
-                off = phoff + i * phentsize
-                ptype, poff, _va, _pa, filesz = struct.unpack_from('<IIIII', b, off)
-                if ptype == 3:
-                    interp = b[poff:poff + filesz].rstrip(b'\0').decode()
-            print('PT_INTERP =', interp)
-            assert interp is None or 'musl' in interp, 'interpreter is not musl'
+          python3 - <<'PY'
+          import struct
 
-            head = bytes.fromhex('4b4d44000000020006010000030000001d000000ca0000000600000000000000')
-            tail = bytes.fromhex('205374616e646172642032303139004f666669636520576f7264203230313900')
-            assert head in b, 'KMS 数据头不在二进制里'
-            assert tail in b, 'KMS 数据尾不在二进制里（数据没内嵌全）'
-            print('size =', len(b), 'bytes, KMS 数据已内嵌')
-            assert 40000 < len(b) < 300000, 'size abnormal'
-            PY
+          b = open('/tmp/vlmcsd.out', 'rb').read()
+          assert b[:4] == b'\x7fELF', 'not ELF'
+          assert b[4] == 1, 'not ELF32'
+          assert b[5] == 1, 'not little-endian'
+          e_type, e_machine = struct.unpack_from('<HH', b, 16)
+          assert e_type == 2, 'not executable'
+          assert e_machine == 8, 'not MIPS'
 
-            install -D -m755 /tmp/vlmcsd.out "${GITHUB_WORKSPACE}/files/usr/bin/vlmcsd"
-            ls -l "${GITHUB_WORKSPACE}/files/usr/bin/vlmcsd"
-          } 2>&1 | tee -a /tmp/build.log
+          phoff, = struct.unpack_from('<I', b, 28)
+          phentsize, phnum = struct.unpack_from('<HH', b, 42)
+          interp = None
+          for i in range(phnum):
+              off = phoff + i * phentsize
+              ptype, poff, _va, _pa, filesz = struct.unpack_from('<IIIII', b, off)
+              if ptype == 3:
+                  interp = b[poff:poff + filesz].rstrip(b'\0').decode()
+          print('PT_INTERP =', interp)
+          assert interp is None or 'musl' in interp, 'interpreter is not musl'
+
+          head = bytes.fromhex('4b4d44000000020006010000030000001d000000ca0000000600000000000000')
+          tail = bytes.fromhex('205374616e646172642032303139004f666669636520576f7264203230313900')
+          assert head in b, 'KMS data head missing'
+          assert tail in b, 'KMS data tail missing'
+          print('size =', len(b), 'bytes, KMS data embedded')
+          assert 40000 < len(b) < 300000, 'size abnormal'
+          PY
+
+          install -D -m755 /tmp/vlmcsd.out "${GITHUB_WORKSPACE}/files/usr/bin/vlmcsd"
+          ls -l "${GITHUB_WORKSPACE}/files/usr/bin/vlmcsd"
 
       - name: 下载 ImageBuilder
         run: |
-          set -eux
-          {
-            IB="openwrt-imagebuilder-${OWRT_VER}-${TARGET}-${SUBTARGET}.Linux-x86_64"
-            wget -q "https://downloads.openwrt.org/releases/${OWRT_VER}/targets/${TARGET}/${SUBTARGET}/${IB}.tar.zst"
-            tar --zstd -xf "${IB}.tar.zst"
-            echo "IB_DIR=${IB}" >> "$GITHUB_ENV"
-          } 2>&1 | tee -a /tmp/build.log
+          set -euxo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
+          IB="openwrt-imagebuilder-${OWRT_VER}-${TARGET}-${SUBTARGET}.Linux-x86_64"
+          wget -q "https://downloads.openwrt.org/releases/${OWRT_VER}/targets/${TARGET}/${SUBTARGET}/${IB}.tar.zst"
+          tar --zstd -xf "${IB}.tar.zst"
+          echo "IB_DIR=${IB}" >> "$GITHUB_ENV"
 
       - name: 校验 profile
         run: |
-          set -eux
-          {
-            cd "$IB_DIR"
-            make info > /tmp/info.txt 2>&1 || true
-            if grep -q "$PROFILE" /tmp/info.txt; then
-              echo "profile 存在: $PROFILE"
-              grep -A3 "$PROFILE" /tmp/info.txt | head -5
-            else
-              echo "!! profile 不存在: $PROFILE"
-              grep -i newifi /tmp/info.txt || sed -n '1,60p' /tmp/info.txt
-              exit 1
-            fi
-          } 2>&1 | tee -a /tmp/build.log
+          set -euxo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
+          cd "$IB_DIR"
+          make info > /tmp/info.txt 2>&1 || true
+          if grep -q "$PROFILE" /tmp/info.txt; then
+            echo "profile 存在: $PROFILE"
+            grep -A3 "$PROFILE" /tmp/info.txt | head -5
+          else
+            echo "!! profile 不存在: $PROFILE"
+            grep -i newifi /tmp/info.txt || sed -n '1,60p' /tmp/info.txt
+            exit 1
+          fi
 
       - name: 编译固件
         run: |
           set -euxo pipefail
-          {
-            cd "$IB_DIR"
-            make image \
-              PROFILE="$PROFILE" \
-              PACKAGES="$PKGS" \
-              FILES="$GITHUB_WORKSPACE/files"
-            OUT="bin/targets/${TARGET}/${SUBTARGET}"
-            echo "--- 产物 ---"
-            ls -lh "$OUT"/*.bin
-            sha256sum "$OUT"/*sysupgrade.bin | tee /tmp/sum.txt
-          } 2>&1 | tee -a /tmp/build.log
+          exec > >(tee -a /tmp/build.log) 2>&1
+          cd "$IB_DIR"
+          make image \
+            PROFILE="$PROFILE" \
+            PACKAGES="$PKGS" \
+            FILES="$GITHUB_WORKSPACE/files"
+          OUT="bin/targets/${TARGET}/${SUBTARGET}"
+          echo "--- 产物 ---"
+          ls -lh "$OUT"/*.bin
+          sha256sum "$OUT"/*sysupgrade.bin | tee /tmp/sum.txt
 
       - name: 校验根文件系统内容与体积
         run: |
-          set -e
-          {
-            ROOT=$(find . -maxdepth 6 -type d -name 'root-ramips' | head -1)
-            test -n "$ROOT" || { echo "!! 找不到 root-ramips"; exit 1; }
-            echo "ROOT=$ROOT"
-            echo "--- 必须存在 ---"
-            for p in usr/bin/vlmcsd etc/init.d/vlmcsd etc/init.d/proxy-mipsle \
-                     etc/uci-defaults/99-newifi-custom usr/bin/curl; do
-              test -e "$ROOT/$p" && echo "OK   $p" || { echo "!! 缺 $p"; exit 1; }
-            done
-            if test -e "$ROOT/etc/vlmcsd.kmd"; then echo "!! 多带了 vlmcsd.kmd"; exit 1; fi
-            echo "OK   无 kmd（数据内嵌）"
-            echo "--- 必须已剔除 ---"
-            for p in etc/init.d/wpad usr/sbin/wpa_supplicant usr/sbin/hostapd; do
-              if test -e "$ROOT/$p"; then echo "!! 还在: $p"; exit 1; else echo "GONE $p"; fi
-            done
-            if ls "$ROOT"/lib/modules/*/mt76* >/dev/null 2>&1; then echo "!! wifi 驱动还在"; exit 1; fi
-            echo "GONE wifi 驱动"
-            if ls "$ROOT"/lib/modules/*/ppp* >/dev/null 2>&1; then echo "!! ppp 还在"; exit 1; fi
-            echo "GONE ppp"
-            echo "--- 体积 ---"
-            du -sh "$ROOT"
-            du -sk "$ROOT"/* 2>/dev/null | sort -n | tail -12
-            du -h --max-depth=2 "$ROOT/usr/lib" 2>/dev/null | sort -h | tail -8
-          } 2>&1 | tee -a /tmp/build.log
+          set -euo pipefail
+          exec > >(tee -a /tmp/build.log) 2>&1
+          ROOT=$(find . -maxdepth 6 -type d -name 'root-ramips' | head -1)
+          test -n "$ROOT"
+          echo "ROOT=$ROOT"
+          echo "--- 必须存在 ---"
+          for p in usr/bin/vlmcsd etc/init.d/vlmcsd etc/init.d/proxy-mipsle \
+                   etc/uci-defaults/99-newifi-custom usr/bin/curl; do
+            test -e "$ROOT/$p" && echo "OK   $p" || { echo "!! 缺 $p"; exit 1; }
+          done
+          if test -e "$ROOT/etc/vlmcsd.kmd"; then echo "!! 多带了 vlmcsd.kmd"; exit 1; fi
+          echo "OK   无 kmd（数据内嵌）"
+          echo "--- 必须已剔除 ---"
+          for p in etc/init.d/wpad usr/sbin/wpa_supplicant usr/sbin/hostapd; do
+            if test -e "$ROOT/$p"; then echo "!! 还在: $p"; exit 1; else echo "GONE $p"; fi
+          done
+          if ls "$ROOT"/lib/modules/*/mt76* >/dev/null 2>&1; then echo "!! wifi 驱动还在"; exit 1; fi
+          echo "GONE wifi 驱动"
+          if ls "$ROOT"/lib/modules/*/ppp* >/dev/null 2>&1; then echo "!! ppp 还在"; exit 1; fi
+          echo "GONE ppp"
+          echo "--- 体积 ---"
+          du -sh "$ROOT"
+          du -sk "$ROOT"/* 2>/dev/null | sort -n | tail -12
+          du -h --max-depth=2 "$ROOT/usr/lib" 2>/dev/null | sort -h | tail -8
 
       - name: 记录构建信息
         run: |
