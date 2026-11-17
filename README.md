@@ -18,6 +18,7 @@ OpenWrt **25.12.6**（当前 stable）+ Image Builder，Newifi-D2（D-Team / MT7
 |---|---|
 | `luci-ssl` | 管理后台（含 uhttpd + HTTPS） |
 | `curl` + `ca-bundle` | 代理服务开机拉二进制要用 |
+| `openssh-sftp-server` | **SFTP 文件传输**（113 KB）。dropbear 只做 SSH 外壳，收到 `subsystem sftp` 请求时 exec 编译期写死的 `/usr/lib/sftp-server`，缺了它 WinSCP/MobaXterm 只能走 SCP |
 | `sqm-scripts` + `luci-app-sqm` + `tc-tiny` + `kmod-sched-cake` + `kmod-ifb` | **SQM 流量整形**（cake），治 bufferbloat |
 | `iptables-nft` + `iptables-mod-ipopt` | `sqm-scripts` 的硬依赖（`piece_of_cake` 本身不调 iptables，但包定义里写了） |
 | `vlmcsd` | **KMS 激活服务**，监听 `1688`（官方源没有这个包，CI 里用 SDK 的 musl 工具链从源码编，KMS 数据内嵌，不依赖 `/etc/vlmcsd.kmd`） |
@@ -166,6 +167,30 @@ cscript ospp.vbs /act
 
 看激活请求有没有进来：`logread -e vlmcsd | tail`。
 
+## SFTP 传文件
+
+`openssh-sftp-server` 已编进固件。dropbear 收到 `subsystem sftp` 请求时会 exec `/usr/lib/sftp-server`，装了这个包就直接能用，**不需要装整套 openssh-server，也不用改 dropbear 配置**。
+
+客户端（端口 22、密码就是 root 密码）：
+
+| 客户端 | 地址栏 |
+|---|---|
+| WinSCP / FileZilla | `sftp://root@172.20.0.1` |
+| MobaXterm | 新建 SFTP session → 172.20.0.1 / root |
+| Windows 资源管理器 | `\\172.20.0.1` 不行，SFTP 不是 SMB；用 `sftp 172.20.0.1` 或下面的一行命令 |
+| 命令行（Windows 自带 OpenSSH） | `sftp root@172.20.0.1`，然后 `put 本地文件 /tmp/` |
+
+Shell 里一行推/拉（Windows 10+ 自带 `scp`，用的是同一套 SSH）：
+
+```powershell
+scp .\openwrt-25.12.6-...-sysupgrade.bin root@172.20.0.1:/tmp/
+scp root@172.20.0.1:/etc/config/network .
+```
+
+注意两点：
+- 默认落在 `/root`（overlay），**大文件放 `/tmp`**（内存盘，重启没）。别把固件往 `/root` 里塞，25MB 的 overlay 顶不住。
+- `/usr/lib/sftp-server` 只在 overlay 占 113 KB；刷了带这个包的固件后它就在 squashfs 里，不占。
+
 ## 验证
 
 ```sh
@@ -176,6 +201,7 @@ logread -e proxy-mipsle | tail             # 代理二进制拉下来没有
 netstat -lntp | grep 1688                  # KMS 在听
 netstat -lnup | grep :123                  # NTP 服务端在听
 tc -s qdisc show dev wan | head -3         # SQM 的 cake 挂上了
+ls -l /usr/lib/sftp-server                 # SFTP 子进程在（WinSCP 用得上）
 curl -x http://cl:cl@172.20.0.1:1089 -sI https://www.baidu.com | head -1
 ```
 

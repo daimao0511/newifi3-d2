@@ -21,6 +21,7 @@ env:
     luci-ssl
     luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn
     curl ca-bundle
+    openssh-sftp-server
     sqm-scripts luci-app-sqm luci-i18n-sqm-zh-cn
     tc-tiny ip-tiny kmod-sched-cake kmod-ifb iptables-nft iptables-mod-ipopt
     -wpad-basic-mbedtls
@@ -201,6 +202,7 @@ jobs:
                    usr/libexec/rpcd/luci.argon \
                    etc/init.d/sqm usr/lib/sqm/piece_of_cake.qos \
                    etc/init.d/sysntpd usr/sbin/ntpd \
+                   usr/lib/sftp-server \
                    www/luci-static/resources/view/network/sqm.js \
                    usr/share/luci/menu.d/luci-app-sqm.json; do
             test -e "$ROOT/$p" && echo "OK   $p" || { echo "!! 缺 $p"; exit 1; }
