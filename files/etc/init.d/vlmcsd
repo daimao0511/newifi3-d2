@@ -1,13 +1,14 @@
 #!/bin/sh /etc/rc.common
 # /etc/init.d/vlmcsd —— KMS 激活服务（vLMCSD，端口 1688）
 #
-# 编译：GitHub Actions 里用 OpenWrt SDK 的 mipsel_24kc/musl 工具链交叉编译，
-#       产物直接塞进 /usr/bin/vlmcsd，约 200 KB，落在只读 squashfs 上，不写 NAND。
+# 编译：GitHub Actions 里用 OpenWrt SDK 的 mipsel_24kc/musl 工具链从源码编，
+#       带 -DFULL_INTERNAL_DATA，KMS 数据内嵌在二进制里，运行时不依赖
+#       /etc/vlmcsd.kmd。产物约 70 KB，落在只读 squashfs 上，不写 NAND。
 #
 # 参数说明：
-#   -D  前台运行（procd 要能盯着）
-#   -e  日志打到 stdout，由 procd 收进 logread
-#   -P  监听端口，默认 1688
+#   -D          前台运行（procd 要能盯着）
+#   -e          日志打到 stdout，由 procd 收进 logread
+#   -L addr:port 监听地址与端口，固定 0.0.0.0:1688
 #
 # 手工调试：/etc/init.d/vlmcsd restart && logread -e vlmcsd | tail
 
@@ -17,7 +18,7 @@ USE_PROCD=1
 
 start_service() {
 	procd_open_instance
-	procd_set_param command /usr/bin/vlmcsd -D -e -P 1688
+	procd_set_param command /usr/bin/vlmcsd -D -e -L 0.0.0.0:1688
 	# 起不来就 5 秒后重试，正常跑着就不会无故重启
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1

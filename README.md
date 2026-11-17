@@ -18,7 +18,7 @@ OpenWrt **25.12.6**（当前 stable）+ Image Builder，Newifi-D2（D-Team / MT7
 |---|---|
 | `luci-ssl` | 管理后台（含 uhttpd + HTTPS） |
 | `curl` + `ca-bundle` | 代理服务开机拉二进制要用 |
-| `vlmcsd` | **KMS 激活服务**，监听 `1688`（官方源没有这个包，CI 里用 SDK 现编） |
+| `vlmcsd` | **KMS 激活服务**，监听 `1688`（官方源没有这个包，CI 里用 SDK 的 musl 工具链从源码编，KMS 数据内嵌，不依赖 `/etc/vlmcsd.kmd`） |
 
 ### 剔掉的（约省 2.9 MB）
 
@@ -112,7 +112,7 @@ curl -x http://cl:cl@172.20.0.1:1089 -sI https://www.baidu.com | head -1
 ## 目录
 
 ```
-.github/workflows/build.yml               SDK 编 vlmcsd → ImageBuilder 出固件 → 内容校验
+.github/workflows/build.yml               SDK 工具链编 vlmcsd → ImageBuilder 出固件 → 内容校验
 files/etc/uci-defaults/99-newifi-custom   首启一次性配置
 files/etc/init.d/vlmcsd                   KMS 服务
 files/etc/init.d/proxy-mipsle             代理服务（下载 + 运行合一，二进制不落闪存）
@@ -121,3 +121,14 @@ files/usr/bin/vlmcsd                      CI 里现编，不进版本库（.giti
 
 `.gitattributes` 强制 LF。**shell 脚本被 checkout 成 CRLF 会直接跑挂**，别改成 `core.autocrlf=true` 那一套。
 `99-newifi-custom` / `vlmcsd` / `proxy-mipsle` 必须保持 `100755`。
+
+## vlmcsd 怎么编的
+
+不走它的 GNUmakefile —— 那玩意儿是 BSD make 语法，GNU make 进去会去调 `gmake`，Ubuntu runner 上没有这个命令，直接 command not found。改成直接列源码调交叉 gcc，参数对齐上游 `BASECFLAGS`：
+
+```
+-D_CRYPTO_INTERNAL     自带 AES，不链接 openssl
+-DFULL_INTERNAL_DATA   把 15085 字节完整 KMS 数据编进去 → 运行时不找 vlmcsd.kmd
+```
+
+编完硬校验四件事，任一不满足就让构建失败：ELF32、小端、`e_machine=8`(MIPS)、解释器是 musl；再查 KMS 数据的头尾各 32 字节确实在二进制里（防止数据没内嵌全，刷完开机才发现）。
