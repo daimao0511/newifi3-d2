@@ -1,0 +1,75 @@
+#!/bin/sh /etc/rc.common
+# /etc/init.d/proxy-mipsle  ——  单文件版（下载 + 运行合一）
+#
+# sing-box mixed(HTTP/SOCKS5) 代理。二进制常驻内存盘 /tmp，开机自动拉取。
+# 闪存上只有这一个脚本（约 2 KB），不写 NAND。
+#
+# 设计说明：
+#   整个流程塞进一条 `/bin/sh -c '...'`，procd 跟踪的是 sh 进程；
+#   末尾 exec 后 PID 不变、进程镜像换成二进制，procd 依旧能监控和 respawn。
+#   所以不需要额外的 run 脚本。
+#
+# 手工调试：
+#   /etc/init.d/proxy-mipsle restart && logread -e proxy-mipsle | tail
+
+START=99
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	mkdir -p /tmp/proxy
+
+	procd_open_instance
+	procd_set_param command /bin/sh -c '
+BIN=/tmp/proxy/proxy-mipsle
+PART=/tmp/proxy/proxy-mipsle.part
+URL="https://clash.daimao.qzz.io:8890/dl/proxy-mipsle"
+SHA="d71ffeb758063af93fea0e0d69ec58b073516fd9859dcfb8bce84b8a6cf201ff"
+
+sum_of() { sha256sum "$1" 2>/dev/null | cut -d" " -f1; }
+
+mkdir -p /tmp/proxy
+
+# 内存盘里已有且校验通过就直接跑，不重复下载
+if [ ! -f "$BIN" ] || [ "$(sum_of "$BIN")" != "$SHA" ]; then
+	i=0
+	while [ $i -lt 10 ]; do
+		i=$((i + 1))
+		rm -f "$PART"
+		if curl -fsSL -k --connect-timeout 5 --max-time 300 -o "$PART" "$URL"; then
+			got="$(sum_of "$PART")"
+			if [ "$got" = "$SHA" ]; then
+				chmod +x "$PART"
+				mv "$PART" "$BIN"
+				logger -t proxy-mipsle "downloaded ok (attempt $i)"
+				break
+			fi
+			logger -t proxy-mipsle "sha256 mismatch attempt $i: $got"
+		else
+			logger -t proxy-mipsle "download failed attempt $i"
+		fi
+		rm -f "$PART"
+		sleep 5
+	done
+fi
+
+[ -x "$BIN" ] || { logger -t proxy-mipsle "binary unavailable, giving up"; exit 1; }
+
+exec "$BIN" --listen 0.0.0.0 --port 1089 --user cl --pass cl --log-level warn
+'
+	# threshold 0 = 不限次数重试，网络没起来时会一直等
+	procd_set_param respawn 0 5 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param env GOMAXPROCS=2
+	procd_close_instance
+}
+
+reload_service() {
+	stop
+	start
+}
+
+service_triggers() {
+	procd_add_reload_trigger "proxy-mipsle"
+}

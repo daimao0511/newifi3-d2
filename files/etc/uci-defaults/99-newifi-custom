@@ -73,4 +73,22 @@ uci set "firewall.@rule[-1].target=ACCEPT"
 
 uci commit firewall
 
+# ---------------- 代理服务自启 ----------------
+# 二进制仍然只在 /tmp（内存盘），闪存上只有这个 2KB 的 init 脚本，不写 NAND
+if [ -x /etc/init.d/proxy-mipsle ]; then
+	/etc/init.d/proxy-mipsle enable
+	# 此刻网络还没起来，拉不下来没关系：procd 是 respawn 0 5 0（无限重试），
+	# 等 WAN 通了以后自己会成功
+	/etc/init.d/proxy-mipsle start &
+fi
+
+# ---------------- 关 wifi（这台只当有线路由用） ----------------
+# 首启时 /etc/config/wireless 由 mac80211 自动生成，未必已经存在；
+# 只有确实生成了 wifi-device 段才去改，避免写出半截配置把 wifi 弄坏
+if uci -q get 'wireless.@wifi-device[0]' >/dev/null 2>&1; then
+	uci set 'wireless.@wifi-device[0].disabled=1'
+	uci -q set 'wireless.@wifi-device[1].disabled=1'
+	uci commit wireless
+fi
+
 exit 0

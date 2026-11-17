@@ -3,6 +3,7 @@ name: build-newifi-d2
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths:
       - 'files/**'
       - '.github/workflows/build.yml'
@@ -12,44 +13,82 @@ env:
   TARGET: 'ramips'
   SUBTARGET: 'mt7621'
   PROFILE: 'd-team_newifi-d2'
+  PACKAGES: 'luci-ssl curl ca-bundle openssh-sftp-server'
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
 
       - name: 安装依赖
-        run: sudo apt-get update && sudo apt-get install -y zstd wget
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd wget python3
+
+      - name: 预检 —— uci-defaults 语法 / 权限位 / 换行符
+        run: |
+          set -e
+          f=files/etc/uci-defaults/99-newifi-custom
+          sh -n "$f" && echo "语法 OK: $f"
+          test -x "$f" || { echo "!! $f 没有可执行位，首启不会执行"; exit 1; }
+          if grep -q $'\r' "$f"; then echo "!! $f 含 CRLF，脚本会挂"; exit 1; fi
+          echo "预检通过"
 
       - name: 下载 ImageBuilder
         run: |
           IB="openwrt-imagebuilder-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}.Linux-x86_64"
-          wget -q "https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/${IB}.tar.zst"
+          URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/${IB}.tar.zst"
+          echo "GET $URL"
+          wget -q "$URL"
           tar --zstd -xf "${IB}.tar.zst"
           echo "IB_DIR=${IB}" >> "$GITHUB_ENV"
 
-      - name: 校验 profile 名称
+      - name: 校验 profile
         run: |
+          set -e
           cd "$IB_DIR"
-          make info 2>/dev/null | grep -i -B1 -A3 'newifi' || echo '!! 未找到 newifi profile，检查 PROFILE 变量'
+          make info > /tmp/info.txt 2>&1 || true
+          if grep -q "$PROFILE" /tmp/info.txt; then
+            echo "profile 存在: $PROFILE"
+            grep -A3 "$PROFILE" /tmp/info.txt | head -5
+          else
+            echo "!! profile 不存在: $PROFILE"
+            grep -i newifi /tmp/info.txt || sed -n '1,60p' /tmp/info.txt
+            exit 1
+          fi
 
       - name: 编译固件
         run: |
+          set -e
           cd "$IB_DIR"
           make image \
-            PROFILE="${PROFILE}" \
-            PACKAGES="luci-ssl openssh-sftp-server curl ca-bundle" \
-            FILES="$(pwd)/../files"
+            PROFILE="$PROFILE" \
+            PACKAGES="$PACKAGES" \
+            FILES="$GITHUB_WORKSPACE/files"
+          OUT="bin/targets/${TARGET}/${SUBTARGET}"
           echo "--- 产物 ---"
-          ls -lh bin/targets/${TARGET}/${SUBTARGET}/*.bin
-          echo "--- 校验值 ---"
-          sha256sum bin/targets/${TARGET}/${SUBTARGET}/*sysupgrade.bin
+          ls -lh "$OUT"/*.bin
+          echo "--- sha256 ---"
+          sha256sum "$OUT"/*sysupgrade.bin | tee /tmp/sum.txt
+
+      - name: 记录构建信息
+        run: |
+          {
+            echo "OpenWrt $OPENWRT_VERSION / $TARGET-$SUBTARGET / $PROFILE"
+            echo "包: $PACKAGES"
+            echo
+            cat /tmp/sum.txt
+          } > /tmp/build-info.txt
+          cat /tmp/build-info.txt
 
       - uses: actions/upload-artifact@v4
         with:
           name: newifi-d2-sysupgrade
-          path: openwrt-imagebuilder-*/bin/targets/ramips/mt7621/*sysupgrade.bin
+          path: |
+            openwrt-imagebuilder-*/bin/targets/ramips/mt7621/*sysupgrade.bin
+            /tmp/build-info.txt
           if-no-files-found: error
+          retention-days: 30
