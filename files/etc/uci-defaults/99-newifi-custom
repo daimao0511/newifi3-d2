@@ -3,15 +3,17 @@
 # 首次启动执行一次，成功后 OpenWrt 自动把它从 /etc/uci-defaults 删掉，
 # 不会每次开机重复跑。
 #
-# 内容 = 当前这台机器上真实在用的 5 项配置，别的一律不碰：
+# 内容 = 这台机器真实在用的配置，别的一律不碰：
 #   1) LAN 172.20.0.1/24
 #   2) wan2 = lan1, 192.168.116.253/24
 #   3) 4 条静态路由经 192.168.116.250
-#   4) 防火墙 wan 区纳入 wan2
-#   5) 放行 tcp/1089 (src 192.168.0.0/16)
+#   4) 防火墙 wan 区纳入 wan2，放行 1089 / 1688
+#   5) 代理服务、KMS 服务自启
+#   6) wifi 关掉、apk 源换国内镜像
 #
-# 注意：官方 24.10 的 ramips/mt7621 是 DSA，网口直接叫 lan1~lan4 / wan，
-# 不需要 VLAN 那套 swconfig 操作。
+# 注意：25.12 / 24.10 的 ramips/mt7621 都是 DSA，网口直接叫 lan1~lan4 / wan，
+# 不需要 VLAN 那套 swconfig 操作。设备树里 port@3 = lan1，就是原来 swconfig
+# 固件上的 switch port 3。
 
 [ -f /etc/config/network ] || exit 1
 
@@ -62,16 +64,24 @@ while [ "$j" -lt 20 ]; do
 	j=$((j + 1))
 done
 
-# 放行 1089，源地址按 wan2 侧整段 /16 放，避免以后又漏网段
-uci add firewall rule >/dev/null
-uci set "firewall.@rule[-1].name=Allow-proxy-mipsle-1089"
-uci set "firewall.@rule[-1].src=wan"
-uci set "firewall.@rule[-1].src_ip=192.168.0.0/16"
-uci set "firewall.@rule[-1].proto=tcp"
-uci set "firewall.@rule[-1].dest_port=1089"
-uci set "firewall.@rule[-1].target=ACCEPT"
+# 放行 1089 / 1688，源地址按 wan2 侧整段 /16 放，避免以后又漏网段。
+# lan 区默认 input ACCEPT，所以内网访问这两个端口不用额外加规则。
+for p in 1089:Allow-proxy-mipsle-1089 1688:Allow-kms-1688; do
+	uci add firewall rule >/dev/null
+	uci set "firewall.@rule[-1].name=${p#*:}"
+	uci set "firewall.@rule[-1].src=wan"
+	uci set "firewall.@rule[-1].src_ip=192.168.0.0/16"
+	uci set "firewall.@rule[-1].proto=tcp"
+	uci set "firewall.@rule[-1].dest_port=${p%%:*}"
+	uci set "firewall.@rule[-1].target=ACCEPT"
+done
 
 uci commit firewall
+
+# ---------------- DNS：给 KMS 一个短名字 ----------------
+# 客户端 slmgr /skms kms.lan:1688 就能用，不用记 IP
+uci -q add_list 'dhcp.@dnsmasq[0].address=/kms.lan/172.20.0.1'
+uci commit dhcp
 
 # ---------------- 代理服务自启 ----------------
 # 二进制仍然只在 /tmp（内存盘），闪存上只有这个 2KB 的 init 脚本，不写 NAND
@@ -82,13 +92,31 @@ if [ -x /etc/init.d/proxy-mipsle ]; then
 	/etc/init.d/proxy-mipsle start &
 fi
 
+# ---------------- KMS 激活服务自启 ----------------
+# 纯本地服务，不依赖网络，直接起
+if [ -x /etc/init.d/vlmcsd ]; then
+	/etc/init.d/vlmcsd enable
+	/etc/init.d/vlmcsd start
+fi
+
 # ---------------- 关 wifi（这台只当有线路由用） ----------------
 # 首启时 /etc/config/wireless 由 mac80211 自动生成，未必已经存在；
-# 只有确实生成了 wifi-device 段才去改，避免写出半截配置把 wifi 弄坏
+# 只有确实生成了 wifi-device 段才去改，避免写出半截配置把 wifi 弄坏。
+# 本固件已经把 wifi 驱动整个剔了，这段只是为了将来万一加回来时能自动关掉。
 if uci -q get 'wireless.@wifi-device[0]' >/dev/null 2>&1; then
 	uci set 'wireless.@wifi-device[0].disabled=1'
 	uci -q set 'wireless.@wifi-device[1].disabled=1'
 	uci commit wireless
+fi
+
+# ---------------- 软件源换国内镜像 ----------------
+# 只换域名，路径和 kmods 的 kernel 版本号保持原样。官方源在国内拉包太慢。
+if [ -f /etc/apk/repositories ]; then
+	sed -i 's#https://downloads.openwrt.org#https://mirrors.ustc.edu.cn/openwrt#' /etc/apk/repositories
+fi
+# 24.10 及更早用的是 opkg
+if [ -f /etc/opkg/distfeeds.conf ]; then
+	sed -i 's#https://downloads.openwrt.org#https://mirrors.ustc.edu.cn/openwrt#' /etc/opkg/distfeeds.conf
 fi
 
 exit 0

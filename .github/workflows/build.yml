@@ -9,16 +9,22 @@ on:
       - '.github/workflows/build.yml'
 
 env:
-  OPENWRT_VERSION: '24.10.3'
+  OWRT_VER: '25.12.6'
   TARGET: 'ramips'
   SUBTARGET: 'mt7621'
   PROFILE: 'd-team_newifi-d2'
-  PACKAGES: 'luci-ssl curl ca-bundle openssh-sftp-server'
+  SDK: 'openwrt-sdk-25.12.6-ramips-mt7621_gcc-14.3.0_musl.Linux-x86_64'
+  PKGS: >-
+    luci-ssl curl ca-bundle
+    -wpad-basic-mbedtls -kmod-mt7603 -kmod-mt76x2 -kmod-mac80211 -kmod-cfg80211
+    -kmod-usb3 -kmod-usb-ledtrig-usbport
+    -ppp -ppp-mod-pppoe
+    -odhcpd-ipv6only
 
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
@@ -26,21 +32,57 @@ jobs:
       - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y zstd wget python3
+          sudo apt-get install -y zstd wget curl file
 
-      - name: 预检 —— uci-defaults 语法 / 权限位 / 换行符
+      - name: 预检 —— 脚本语法 / 权限位 / 换行符
         run: |
           set -e
-          f=files/etc/uci-defaults/99-newifi-custom
-          sh -n "$f" && echo "语法 OK: $f"
-          test -x "$f" || { echo "!! $f 没有可执行位，首启不会执行"; exit 1; }
-          if grep -q $'\r' "$f"; then echo "!! $f 含 CRLF，脚本会挂"; exit 1; fi
-          echo "预检通过"
+          for f in files/etc/uci-defaults/99-newifi-custom \
+                   files/etc/init.d/vlmcsd \
+                   files/etc/init.d/proxy-mipsle; do
+            sh -n "$f"; echo "语法 OK: $f"
+            test -x "$f" || { echo "!! $f 缺可执行位"; exit 1; }
+            if grep -q $'\r' "$f"; then echo "!! $f 含 CRLF"; exit 1; fi
+          done
+
+      - name: 下载 OpenWrt SDK
+        run: |
+          set -e
+          URL="https://downloads.openwrt.org/releases/${OWRT_VER}/targets/${TARGET}/${SUBTARGET}/${SDK}.tar.zst"
+          echo "GET $URL"
+          wget -q "$URL"
+          tar --zstd -xf "${SDK}.tar.zst"
+
+      - name: 交叉编译 vlmcsd（KMS 激活服务）
+        run: |
+          set -e
+          TOOLCHAIN=$(echo "${SDK}"/staging_dir/toolchain-mipsel_24kc_gcc-*/bin)
+          test -d "$TOOLCHAIN" || { echo "!! 找不到交叉工具链"; ls "${SDK}/staging_dir"; exit 1; }
+          export PATH="$TOOLCHAIN:$PATH"
+          echo "工具链: $TOOLCHAIN"
+          mipsel-openwrt-linux-musl-gcc -v 2>&1 | grep -E '^Target:|^gcc version' || true
+
+          curl -fsSL -o /tmp/vlmcsd.tar.gz \
+            https://codeload.github.com/Wind4/vlmcsd/tar.gz/refs/heads/master
+          rm -rf /tmp/vlmcsd && mkdir -p /tmp/vlmcsd
+          tar -xzf /tmp/vlmcsd.tar.gz -C /tmp/vlmcsd --strip-components=1
+
+          # 只编服务端；musl 没有 libpthread / libresolv，所以 NOLPTHREAD=1
+          make -C /tmp/vlmcsd/src vlmcsd \
+            CC=mipsel-openwrt-linux-musl-gcc \
+            NOLPTHREAD=1 \
+            VLMCSD_VERSION=svn1113 \
+            -j"$(nproc)"
+
+          install -D -m755 /tmp/vlmcsd/bin/vlmcsd "${GITHUB_WORKSPACE}/files/usr/bin/vlmcsd"
+          file "${GITHUB_WORKSPACE}/files/usr/bin/vlmcsd"
+          ls -l "${GITHUB_WORKSPACE}/files/usr/bin/vlmcsd"
 
       - name: 下载 ImageBuilder
         run: |
-          IB="openwrt-imagebuilder-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}.Linux-x86_64"
-          URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/${IB}.tar.zst"
+          set -e
+          IB="openwrt-imagebuilder-${OWRT_VER}-${TARGET}-${SUBTARGET}.Linux-x86_64"
+          URL="https://downloads.openwrt.org/releases/${OWRT_VER}/targets/${TARGET}/${SUBTARGET}/${IB}.tar.zst"
           echo "GET $URL"
           wget -q "$URL"
           tar --zstd -xf "${IB}.tar.zst"
@@ -66,19 +108,42 @@ jobs:
           cd "$IB_DIR"
           make image \
             PROFILE="$PROFILE" \
-            PACKAGES="$PACKAGES" \
+            PACKAGES="$PKGS" \
             FILES="$GITHUB_WORKSPACE/files"
           OUT="bin/targets/${TARGET}/${SUBTARGET}"
           echo "--- 产物 ---"
           ls -lh "$OUT"/*.bin
-          echo "--- sha256 ---"
           sha256sum "$OUT"/*sysupgrade.bin | tee /tmp/sum.txt
+
+      - name: 校验根文件系统内容与体积
+        run: |
+          set -e
+          ROOT=$(find . -maxdepth 6 -type d -name 'root-ramips' | head -1)
+          test -n "$ROOT" || { echo "!! 找不到 root-ramips"; exit 1; }
+          echo "ROOT=$ROOT"
+          echo "--- 必须存在 ---"
+          for p in usr/bin/vlmcsd etc/init.d/vlmcsd etc/init.d/proxy-mipsle \
+                   etc/uci-defaults/99-newifi-custom usr/bin/curl; do
+            test -e "$ROOT/$p" && echo "OK   $p" || { echo "!! 缺 $p"; exit 1; }
+          done
+          echo "--- 必须已剔除 ---"
+          for p in etc/init.d/wpad usr/sbin/wpa_supplicant usr/sbin/hostapd; do
+            if test -e "$ROOT/$p"; then echo "!! 还在: $p"; exit 1; else echo "GONE $p"; fi
+          done
+          if ls lib/modules/*/mt76* >/dev/null 2>&1; then echo "!! wifi 驱动还在"; exit 1; fi
+          echo "GONE wifi 驱动"
+          if ls lib/modules/*/ppp* >/dev/null 2>&1; then echo "!! ppp 还在"; exit 1; fi
+          echo "GONE ppp"
+          echo "--- 体积 ---"
+          du -sh "$ROOT"
+          du -sk "$ROOT"/* 2>/dev/null | sort -n | tail -12
+          du -h --max-depth=2 "$ROOT/usr/lib" 2>/dev/null | sort -h | tail -8
 
       - name: 记录构建信息
         run: |
           {
-            echo "OpenWrt $OPENWRT_VERSION / $TARGET-$SUBTARGET / $PROFILE"
-            echo "包: $PACKAGES"
+            echo "OpenWrt $OWRT_VER / $TARGET-$SUBTARGET / $PROFILE"
+            echo "包: $PKGS"
             echo
             cat /tmp/sum.txt
           } > /tmp/build-info.txt
