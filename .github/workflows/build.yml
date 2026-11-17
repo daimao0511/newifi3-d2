@@ -1,0 +1,55 @@
+name: build-newifi-d2
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'files/**'
+      - '.github/workflows/build.yml'
+
+env:
+  OPENWRT_VERSION: '24.10.3'
+  TARGET: 'ramips'
+  SUBTARGET: 'mt7621'
+  PROFILE: 'd-team_newifi-d2'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: sudo apt-get update && sudo apt-get install -y zstd wget
+
+      - name: 下载 ImageBuilder
+        run: |
+          IB="openwrt-imagebuilder-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}.Linux-x86_64"
+          wget -q "https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/${IB}.tar.zst"
+          tar --zstd -xf "${IB}.tar.zst"
+          echo "IB_DIR=${IB}" >> "$GITHUB_ENV"
+
+      - name: 校验 profile 名称
+        run: |
+          cd "$IB_DIR"
+          make info 2>/dev/null | grep -i -B1 -A3 'newifi' || echo '!! 未找到 newifi profile，检查 PROFILE 变量'
+
+      - name: 编译固件
+        run: |
+          cd "$IB_DIR"
+          make image \
+            PROFILE="${PROFILE}" \
+            PACKAGES="luci-ssl openssh-sftp-server curl ca-bundle" \
+            FILES="$(pwd)/../files"
+          echo "--- 产物 ---"
+          ls -lh bin/targets/${TARGET}/${SUBTARGET}/*.bin
+          echo "--- 校验值 ---"
+          sha256sum bin/targets/${TARGET}/${SUBTARGET}/*sysupgrade.bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: newifi-d2-sysupgrade
+          path: openwrt-imagebuilder-*/bin/targets/ramips/mt7621/*sysupgrade.bin
+          if-no-files-found: error

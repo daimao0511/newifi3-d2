@@ -1,0 +1,76 @@
+#!/bin/sh
+#
+# 首次启动执行一次，成功后 OpenWrt 自动把它从 /etc/uci-defaults 删掉，
+# 不会每次开机重复跑。
+#
+# 内容 = 当前这台机器上真实在用的 5 项配置，别的一律不碰：
+#   1) LAN 172.20.0.1/24
+#   2) wan2 = lan1, 192.168.116.253/24
+#   3) 4 条静态路由经 192.168.116.250
+#   4) 防火墙 wan 区纳入 wan2
+#   5) 放行 tcp/1089 (src 192.168.0.0/16)
+#
+# 注意：官方 24.10 的 ramips/mt7621 是 DSA，网口直接叫 lan1~lan4 / wan，
+# 不需要 VLAN 那套 swconfig 操作。
+
+[ -f /etc/config/network ] || exit 1
+
+# ---------------- LAN ----------------
+uci set network.lan.ipaddr='172.20.0.1'
+uci set network.lan.netmask='255.255.255.0'
+
+# ---------------- 把 lan1 从 br-lan 摘出来 ----------------
+# br-lan 是匿名的 config device 段，只能按 name 找到它的下标
+i=0
+while [ "$i" -lt 20 ]; do
+	uci -q get "network.@device[$i]" >/dev/null 2>&1 || break
+	if [ "$(uci -q get "network.@device[$i].name")" = "br-lan" ]; then
+		uci -q del_list "network.@device[$i].ports=lan1"
+		break
+	fi
+	i=$((i + 1))
+done
+
+# ---------------- wan2 ----------------
+uci -q delete network.wan2
+uci set network.wan2=interface
+uci set network.wan2.device='lan1'
+uci set network.wan2.proto='static'
+uci set network.wan2.ipaddr='192.168.116.253'
+uci set network.wan2.netmask='255.255.255.0'
+uci set network.wan2.auto='1'
+
+# ---------------- 4 条静态路由 ----------------
+for t in 192.168.0.0/16 59.227.152.125/32 10.85.200.100/32 10.85.200.99/32; do
+	uci add network route >/dev/null
+	uci set "network.@route[-1].interface=wan2"
+	uci set "network.@route[-1].target=$t"
+	uci set "network.@route[-1].gateway=192.168.116.250"
+done
+
+uci commit network
+
+# ---------------- 防火墙 ----------------
+# wan 区纳入 wan2（按 name 找下标，不依赖固定顺序）
+j=0
+while [ "$j" -lt 20 ]; do
+	uci -q get "firewall.@zone[$j]" >/dev/null 2>&1 || break
+	if [ "$(uci -q get "firewall.@zone[$j].name")" = "wan" ]; then
+		uci add_list "firewall.@zone[$j].network=wan2"
+		break
+	fi
+	j=$((j + 1))
+done
+
+# 放行 1089，源地址按 wan2 侧整段 /16 放，避免以后又漏网段
+uci add firewall rule >/dev/null
+uci set "firewall.@rule[-1].name=Allow-proxy-mipsle-1089"
+uci set "firewall.@rule[-1].src=wan"
+uci set "firewall.@rule[-1].src_ip=192.168.0.0/16"
+uci set "firewall.@rule[-1].proto=tcp"
+uci set "firewall.@rule[-1].dest_port=1089"
+uci set "firewall.@rule[-1].target=ACCEPT"
+
+uci commit firewall
+
+exit 0
