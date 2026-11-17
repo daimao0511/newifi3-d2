@@ -71,6 +71,8 @@ jobs:
 
           TOOLCHAIN=$(find "${SDK}/staging_dir" -maxdepth 1 -type d -name 'toolchain-*' | head -1)
           test -n "$TOOLCHAIN"
+          # 后面要 cd 到源码目录，工具链必须用绝对路径，否则 exec 时找不到文件
+          TOOLCHAIN=$(realpath "$TOOLCHAIN")
           CC=$(ls "$TOOLCHAIN"/bin/*-openwrt-linux-musl-gcc | head -1)
           echo "TOOLCHAIN=$TOOLCHAIN"
           echo "CC=$CC"
