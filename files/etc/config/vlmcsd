@@ -1,0 +1,4 @@
+config vlmcsd 'main'
+	option enabled '1'
+	option listen '0.0.0.0'
+	option port '1688'

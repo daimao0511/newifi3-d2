@@ -203,6 +203,10 @@ jobs:
                    etc/init.d/sqm usr/lib/sqm/piece_of_cake.qos \
                    etc/init.d/sysntpd usr/sbin/ntpd \
                    usr/lib/sftp-server \
+                   etc/config/vlmcsd \
+                   www/luci-static/resources/view/vlmcsd/overview.js \
+                   usr/share/luci/menu.d/luci-app-vlmcsd.json \
+                   usr/share/rpcd/acl.d/luci-app-vlmcsd.json \
                    www/luci-static/resources/view/network/sqm.js \
                    usr/share/luci/menu.d/luci-app-sqm.json; do
             test -e "$ROOT/$p" && echo "OK   $p" || { echo "!! 缺 $p"; exit 1; }

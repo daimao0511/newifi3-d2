@@ -1,0 +1,23 @@
+{
+	"luci-app-vlmcsd": {
+		"description": "KMS 激活服务（vlmcsd）状态与设置",
+		"read": {
+			"file": {
+				"/sbin/logread": [ "exec" ],
+				"/usr/libexec/logread-ubox": [ "exec" ],
+				"/etc/init.d/vlmcsd": [ "exec" ]
+			},
+			"uci": [ "vlmcsd" ],
+			"ubus": {
+				"service": [ "list" ],
+				"file": [ "read", "list" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/etc/init.d/vlmcsd": [ "exec" ]
+			},
+			"uci": [ "vlmcsd" ]
+		}
+	}
+}

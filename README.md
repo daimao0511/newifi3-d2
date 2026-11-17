@@ -21,7 +21,7 @@ OpenWrt **25.12.6**（当前 stable）+ Image Builder，Newifi-D2（D-Team / MT7
 | `openssh-sftp-server` | **SFTP 文件传输**（113 KB）。dropbear 只做 SSH 外壳，收到 `subsystem sftp` 请求时 exec 编译期写死的 `/usr/lib/sftp-server`，缺了它 WinSCP/MobaXterm 只能走 SCP |
 | `sqm-scripts` + `luci-app-sqm` + `tc-tiny` + `kmod-sched-cake` + `kmod-ifb` | **SQM 流量整形**（cake），治 bufferbloat |
 | `iptables-nft` + `iptables-mod-ipopt` | `sqm-scripts` 的硬依赖（`piece_of_cake` 本身不调 iptables，但包定义里写了） |
-| `vlmcsd` | **KMS 激活服务**，监听 `1688`（官方源没有这个包，CI 里用 SDK 的 musl 工具链从源码编，KMS 数据内嵌，不依赖 `/etc/vlmcsd.kmd`） |
+| `vlmcsd` | **KMS 激活服务**，监听 `1688`（官方源没有这个包，CI 里用 SDK 的 musl 工具链从源码编，KMS 数据内嵌，不依赖 `/etc/vlmcsd.kmd`）；配一个自写 LuCI 页面，菜单在「服务 → KMS 激活」 |
 | `busybox ntpd`（自带） | **NTP 服务端**，监听 `123/udp`，内网机器统一向路由器校时 |
 
 ### 剔掉的（约省 2.9 MB）
@@ -166,6 +166,20 @@ cscript ospp.vbs /act
 办公网那侧（`192.168.0.0/16`）用 `192.168.116.253:1688`，防火墙已经放行。
 
 看激活请求有没有进来：`logread -e vlmcsd | tail`。
+
+### LuCI 里的「服务 → KMS 激活」
+
+官方源里没有 `luci-app-vlmcsd`（`apk search vlmcsd` 是空的），vlmcsd 只是我们编的一个后台服务，所以默认没有菜单。这里自己写了一个轻量页面，随固件预置，四个文件加起来 5 KB 出头：
+
+| 文件 | 作用 |
+|---|---|
+| `etc/config/vlmcsd` | 配置：`enabled` / `listen` / `port` |
+| `etc/init.d/vlmcsd` | 从 uci 读参数启动，端口非法自动退回 1688 |
+| `www/luci-static/resources/view/vlmcsd/overview.js` | 页面：运行状态、累计连接数、最近日志、重启按钮、端口/监听地址设置 |
+| `usr/share/luci/menu.d/luci-app-vlmcsd.json` | 菜单项（服务 → KMS 激活，order 60） |
+| `usr/share/rpcd/acl.d/luci-app-vlmcsd.json` | ACL：`service.list`、`logread`、init 脚本 exec |
+
+状态查询走 procd 的 ubus `service` 对象（`ubus call service list '{"name":"vlmcsd","verbose":true}'`），不额外装 rpcd 模块；改端口/监听地址点「保存并应用」即触发 `reload_config`，靠 init 里的 `procd_add_reload_trigger "vlmcsd"` 用新参数重启，不用重启路由器。
 
 ## SFTP 传文件
 
