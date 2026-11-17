@@ -7,9 +7,10 @@
 #   1) LAN 172.20.0.1/24
 #   2) wan2 = lan1, 192.168.116.253/24
 #   3) 4 条静态路由经 192.168.116.250
-#   4) 防火墙 wan 区纳入 wan2，放行 1089 / 1688
+#   4) 防火墙 wan 区纳入 wan2，放行 1089 / 1688 / 123
 #   5) 代理服务、KMS 服务自启
-#   6) wifi 关掉、apk 源换国内镜像
+#   6) SQM 整形（cake）、NTP 服务端
+#   7) wifi 关掉、apk 源换国内镜像
 #
 # 注意：25.12 / 24.10 的 ramips/mt7621 都是 DSA，网口直接叫 lan1~lan4 / wan，
 # 不需要 VLAN 那套 swconfig 操作。设备树里 port@3 = lan1，就是原来 swconfig
@@ -64,17 +65,25 @@ while [ "$j" -lt 20 ]; do
 	j=$((j + 1))
 done
 
-# 放行 1089 / 1688，源地址按 wan2 侧整段 /16 放，避免以后又漏网段。
-# lan 区默认 input ACCEPT，所以内网访问这两个端口不用额外加规则。
-for p in 1089:Allow-proxy-mipsle-1089 1688:Allow-kms-1688; do
+# 放行端口，源地址按 wan2 侧整段 /16 放，避免以后又漏网段。
+# lan 区默认 input ACCEPT，所以内网访问这些端口不用额外加规则。
+add_rule() { # $1 端口  $2 协议  $3 规则名
 	uci add firewall rule >/dev/null
-	uci set "firewall.@rule[-1].name=${p#*:}"
+	uci set "firewall.@rule[-1].name=$3"
 	uci set "firewall.@rule[-1].src=wan"
 	uci set "firewall.@rule[-1].src_ip=192.168.0.0/16"
-	uci set "firewall.@rule[-1].proto=tcp"
-	uci set "firewall.@rule[-1].dest_port=${p%%:*}"
+	uci set "firewall.@rule[-1].proto=$2"
+	uci set "firewall.@rule[-1].dest_port=$1"
 	uci set "firewall.@rule[-1].target=ACCEPT"
-done
+}
+add_rule 1089 tcp Allow-proxy-mipsle-1089
+add_rule 1688 tcp Allow-kms-1688
+add_rule 123 udp Allow-ntp-123
+
+# SQM 和 flow offloading 是互斥的：offload 让转发流量跳过 qdisc，
+# 一旦打开 SQM 就完全不生效（看着配好了其实没排队）。这里显式关掉。
+uci set firewall.@defaults[0].flow_offloading='0'
+uci set firewall.@defaults[0].flow_offloading_hw='0'
 
 uci commit firewall
 
@@ -98,6 +107,52 @@ if [ -x /etc/init.d/vlmcsd ]; then
 	/etc/init.d/vlmcsd enable
 	/etc/init.d/vlmcsd start
 fi
+
+# ---------------- SQM 智能整形（cake） ----------------
+# 这条线上游实测 ~12 Mbps（1792 KB/s 级），而且会在 4~12 Mbps 之间抖。
+# cake 不提速，它治的是 bufferbloat：满速下载时延迟从几百毫秒压到十几毫秒，
+# 网页还能开、语音不掉。代价是峰值带宽被压到设定值的 85% 左右。
+#
+# download / upload 单位是 kbit/s，各自填「实测值 × 0.9」：
+#   填大了 → 整形器不触发，等于没开；填小了 → 白丢带宽。
+# 改这里不如改界面：LuCI → 网络 → SQM QoS，改完点「应用」立即生效，不用重编固件。
+uci -q delete sqm.@queue[0]
+uci add sqm queue >/dev/null
+uci set sqm.@queue[-1].enabled='1'
+uci set sqm.@queue[-1].interface='wan'
+uci set sqm.@queue[-1].download='10500'
+uci set sqm.@queue[-1].upload='3000'
+# piece_of_cake：进出两个方向都挂 cake，不做 DSCP 分类，最简单也最稳
+uci set sqm.@queue[-1].script='piece_of_cake.qos'
+uci set sqm.@queue[-1].qdisc='cake'
+uci set sqm.@queue[-1].linklayer='ethernet'
+uci set sqm.@queue[-1].linklayer_adaptation_mechanism='default'
+uci set sqm.@queue[-1].overhead='0'
+uci set sqm.@queue[-1].ingress_ecn='ECN'
+uci set sqm.@queue[-1].egress_ecn='ECN'
+uci set sqm.@queue[-1].squash_dscp='1'
+uci set sqm.@queue[-1].squash_ingress='1'
+uci set sqm.@queue[-1].verbosity='5'
+uci set sqm.@queue[-1].debug_logging='0'
+uci commit sqm
+/etc/init.d/sqm enable
+# 此刻 wan 可能还没拿到地址，起不来也没关系：enabled 之后本次 rcS 会再拉一次
+/etc/init.d/sqm restart >/dev/null 2>&1
+
+# ---------------- NTP 服务端 ----------------
+# enable_server=1 让 busybox ntpd 带 -l 参数对外应答；不加这个它只做客户端。
+# 上游服务器换成国内节点：默认那 4 个 pool.ntp.org 在国内解析慢、同步经常超时。
+# KMS 激活对时间敏感（客户端与服务器偏差超过 4 小时直接失败），
+# 内网机器统一指到路由器校时，比各自去连公网 NTP 稳。
+uci set system.ntp.enabled='1'
+uci set system.ntp.enable_server='1'
+uci -q delete system.ntp.server
+uci add_list system.ntp.server='ntp.aliyun.com'
+uci add_list system.ntp.server='ntp.tencent.com'
+uci add_list system.ntp.server='ntp.ntsc.ac.cn'
+uci commit system
+/etc/init.d/sysntpd enable
+/etc/init.d/sysntpd restart >/dev/null 2>&1
 
 # ---------------- 关 wifi（这台只当有线路由用） ----------------
 # 首启时 /etc/config/wireless 由 mac80211 自动生成，未必已经存在；

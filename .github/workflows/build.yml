@@ -21,6 +21,8 @@ env:
     luci-ssl
     luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn
     curl ca-bundle
+    sqm-scripts luci-app-sqm luci-i18n-sqm-zh-cn
+    tc-tiny ip-tiny kmod-sched-cake kmod-ifb iptables-nft iptables-mod-ipopt
     -wpad-basic-mbedtls
     -kmod-mt7603 -kmod-mt76x2 -kmod-mac80211 -kmod-cfg80211
     -kmod-usb3 -kmod-usb-ledtrig-usbport
@@ -196,8 +198,25 @@ jobs:
                    usr/lib/lua/luci/i18n/firewall.zh-cn.lmo \
                    www/luci-static/argon/css/cascade.css \
                    usr/share/ucode/luci/template/themes/argon/head.ut \
-                   usr/libexec/rpcd/luci.argon; do
+                   usr/libexec/rpcd/luci.argon \
+                   etc/init.d/sqm usr/lib/sqm/piece_of_cake.qos \
+                   etc/init.d/sysntpd usr/sbin/ntpd \
+                   www/luci-static/resources/view/network/sqm.js \
+                   usr/share/luci/menu.d/luci-app-sqm.json; do
             test -e "$ROOT/$p" && echo "OK   $p" || { echo "!! 缺 $p"; exit 1; }
+          done
+          # tc 是 alternatives 装到 /usr/libexec 的，按名字找更稳
+          if find "$ROOT/usr/libexec" "$ROOT/sbin" -name 'tc*' | grep -q .; then
+            echo "OK   tc ($(find "$ROOT/usr/libexec" "$ROOT/sbin" -name 'tc*' | head -1))"
+          else
+            echo "!! 缺 tc（SQM 干活要用）"; exit 1
+          fi
+          for m in sch_cake ifb; do
+            if find "$ROOT/lib/modules" -name "${m}.ko" | grep -q .; then
+              echo "OK   kmod $m"
+            else
+              echo "!! 缺 kmod $m"; exit 1
+            fi
           done
           if test -e "$ROOT/etc/vlmcsd.kmd"; then echo "!! 多带了 vlmcsd.kmd"; exit 1; fi
           echo "OK   无 kmd（数据内嵌）"

@@ -18,7 +18,10 @@ OpenWrt **25.12.6**（当前 stable）+ Image Builder，Newifi-D2（D-Team / MT7
 |---|---|
 | `luci-ssl` | 管理后台（含 uhttpd + HTTPS） |
 | `curl` + `ca-bundle` | 代理服务开机拉二进制要用 |
+| `sqm-scripts` + `luci-app-sqm` + `tc-tiny` + `kmod-sched-cake` + `kmod-ifb` | **SQM 流量整形**（cake），治 bufferbloat |
+| `iptables-nft` + `iptables-mod-ipopt` | `sqm-scripts` 的硬依赖（`piece_of_cake` 本身不调 iptables，但包定义里写了） |
 | `vlmcsd` | **KMS 激活服务**，监听 `1688`（官方源没有这个包，CI 里用 SDK 的 musl 工具链从源码编，KMS 数据内嵌，不依赖 `/etc/vlmcsd.kmd`） |
+| `busybox ntpd`（自带） | **NTP 服务端**，监听 `123/udp`，内网机器统一向路由器校时 |
 
 ### 剔掉的（约省 2.9 MB）
 
@@ -42,10 +45,12 @@ OpenWrt **25.12.6**（当前 stable）+ Image Builder，Newifi-D2（D-Team / MT7
 | WAN1（`wan` / port4） | 保持固件默认 `dhcp`，不动 |
 | WAN2（`wan2` / `lan1`） | `static 192.168.116.253/24`，从 `br-lan` 里摘出来 |
 | 4 条静态路由 | 见下，全部经 `192.168.116.250` |
-| 防火墙 | `wan` 区纳入 `wan2`；放行 `tcp/1089`、`tcp/1688`，`src_ip 192.168.0.0/16` |
+| 防火墙 | `wan` 区纳入 `wan2`；放行 `tcp/1089`、`tcp/1688`、`udp/123`，`src_ip 192.168.0.0/16`；**关掉 flow offloading**（它和 SQM 互斥） |
 | DNS | `kms.lan` → `172.20.0.1` |
 | 代理服务 | `/etc/init.d/proxy-mipsle`，开机从 NAS 拉到 `/tmp` 跑，`0.0.0.0:1089` |
 | KMS 服务 | `/etc/init.d/vlmcsd`，`/usr/bin/vlmcsd -D -e -P 1688` |
+| SQM 整形 | `wan` 上跑 cake，下行 `10500` / 上行 `3000` kbit/s，进出双向 |
+| NTP 服务端 | `enable_server=1`，上游换 `ntp.aliyun.com` / `ntp.tencent.com` / `ntp.ntsc.ac.cn` |
 | wifi | 关掉（驱动本来也没装） |
 | 软件源 | `downloads.openwrt.org` → `mirrors.ustc.edu.cn/openwrt` |
 
@@ -78,6 +83,69 @@ done
 1. **设 root 密码。** 固件里没有密码，dropbear 空密码不让登录。浏览器开 `http://172.20.0.1`，LuCI 首登会强制设密码。
 2. **确认 WAN2 那根网线在 `lan1` 上。** 上面那条 `carrier` 命令能看出来；不在就改 `files/etc/uci-defaults/99-newifi-custom` 里的 `network.wan2.device`，重编。
 
+## SQM 怎么调
+
+`sqm-scripts` 只是执行器，真正起作用的是 cake 和那两个数字。**数字填错是这套东西唯一会翻车的地方**：
+
+| 填法 | 后果 |
+|---|---|
+| **大于**真实带宽 | 整形器不触发，等于没开，延迟该炸还是炸 |
+| **小于**真实带宽 | 不丢包但峰值被压住，延迟确实变好 |
+
+出厂预设 `download=10500` / `upload=3000`：下行是路由器上实测 `1.51 MB/s ≈ 12 Mbps × 0.9`；上行没实测过（那条线只有 4–12 Mbps 的下行数据），先给保守值。
+
+改起来**不用重编固件**：
+
+1. LuCI → 网络 → SQM QoS，改 Download / Upload，点「应用」；
+2. 或者命令行：
+
+```sh
+uci set sqm.@queue[0].download='10500'
+uci set sqm.@queue[0].upload='3000'
+uci commit sqm && /etc/init.d/sqm restart
+```
+
+确认真的在整形：
+
+```sh
+tc -s qdisc show dev wan        # 有 cake，Sent 字节在涨
+tc -s qdisc show dev ifb4wan    # 下行整形跑在 ifb 上
+logread -e sqm | tail
+```
+
+跑一次测速，看 `tc -s qdisc show dev wan` 里 `Sent` 的增速 ≈ 设定的 upload，说明整形在工作。
+
+不想用了：LuCI 里取消「Enable this SQM instance」，或 `uci set sqm.@queue[0].enabled='0'; uci commit sqm`。
+
+因为 cake 会接管 qdisc，**flow offloading 必须关着**（`99-newifi-custom` 里已显式写 0）。哪天手动打开 offloading，SQM 会立刻变成摆设。
+
+## NTP 服务端
+
+`enable_server=1` 之后 busybox ntpd 带 `-l` 启动，监听 `0.0.0.0:123/udp`。
+客户端指到 `172.20.0.1` 即可；办公网那侧用 `192.168.116.253`，防火墙已放行 `udp/123`。
+
+```bat
+:: Windows（管理员）
+w32tm /config /manualpeerlist:"172.20.0.1" /syncfromflags:manual /update
+w32tm /resync
+w32tm /stripchart /computer:172.20.0.1 /samples:3
+```
+
+```ini
+# Linux systemd-timesyncd: /etc/systemd/timesyncd.conf
+[Time]
+NTP=172.20.0.1
+```
+
+路由器上验证：
+
+```sh
+pgrep -a ntpd                 # 应该能看到 -l 参数
+netstat -lnup | grep :123
+```
+
+开源节流的理由：KMS 激活对时间敏感，客户端与服务器偏差超过 4 小时直接失败；内网机器统一向路由器校时，比各自去连公网 NTP 稳。
+
 ## KMS 怎么用
 
 服务端在路由器上，端口 1688。客户端（Windows / Office）指过来就行：
@@ -106,6 +174,8 @@ ip route get 10.85.200.99                  # 是否走 wan2
 ls /lib/modules/*/ | grep -c mt76          # 应该是 0，wifi 驱动确实没了
 logread -e proxy-mipsle | tail             # 代理二进制拉下来没有
 netstat -lntp | grep 1688                  # KMS 在听
+netstat -lnup | grep :123                  # NTP 服务端在听
+tc -s qdisc show dev wan | head -3         # SQM 的 cake 挂上了
 curl -x http://cl:cl@172.20.0.1:1089 -sI https://www.baidu.com | head -1
 ```
 
