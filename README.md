@@ -50,9 +50,10 @@ OpenWrt **25.12.6**（当前 stable）+ Image Builder，Newifi-D2（D-Team / MT7
 | DNS | `kms.lan` → `172.20.0.1` |
 | 代理服务 | `/etc/init.d/proxy-mipsle`，开机从 NAS 拉到 `/tmp` 跑，`0.0.0.0:1089` |
 | KMS 服务 | `/etc/init.d/vlmcsd`，`/usr/bin/vlmcsd -D -e -P 1688` |
-| SQM 整形 | `wan` 上跑 cake，下行 `10500` / 上行 `3000` kbit/s，进出双向 |
+| SQM 整形 | `wan` 上跑 cake，下行 `70000` / 上行 `56000` kbit/s（实测 75M/61M × 0.92），进出双向 |
 | NTP 服务端 | `enable_server=1`，上游换 `ntp.aliyun.com` / `ntp.tencent.com` / `ntp.ntsc.ac.cn` |
 | wifi | 关掉（驱动本来也没装） |
+| root 密码 | 空密码时设成 `password`（已有密码不覆盖），dropbear 显式开密码认证 |
 | 软件源 | `downloads.openwrt.org` → `mirrors.ustc.edu.cn/openwrt` |
 
 4 条路由：
@@ -79,9 +80,9 @@ for p in lan1 lan2 lan3 lan4 wan; do
 done
 ```
 
-## 刷完要做的两件事
+## 刷完要做的事
 
-1. **设 root 密码。** 固件里没有密码，dropbear 空密码不让登录。浏览器开 `http://172.20.0.1`，LuCI 首登会强制设密码。
+1. **改 root 密码。** 首启时如果密码为空，`99-newifi-custom` 已经自动设成 `password`（已有密码则不覆盖），SSH 和 LuCI 都能进；但这是公开的弱密码，**刷完请立刻改**：LuCI → 系统 → 管理权，或 `passwd root`。
 2. **确认 WAN2 那根网线在 `lan1` 上。** 上面那条 `carrier` 命令能看出来；不在就改 `files/etc/uci-defaults/99-newifi-custom` 里的 `network.wan2.device`，重编。
 
 ## SQM 怎么调
@@ -93,18 +94,36 @@ done
 | **大于**真实带宽 | 整形器不触发，等于没开，延迟该炸还是炸 |
 | **小于**真实带宽 | 不丢包但峰值被压住，延迟确实变好 |
 
-出厂预设 `download=10500` / `upload=3000`：下行是路由器上实测 `1.51 MB/s ≈ 12 Mbps × 0.9`；上行没实测过（那条线只有 4–12 Mbps 的下行数据），先给保守值。
+出厂预设 `download=70000` / `upload=56000`（kbit/s），来自这台机器上的实测：
 
-改起来**不用重编固件**：
+| 项 | 实测 | 依据 |
+|---|---|---|
+| 下行 | 9.38 MB/s ≈ **75 Mbit/s** | 停掉整形后从阿里 / 清华源拉大文件，稳态一致 |
+| 上行 | 6 路并发 7.6 MB/s ≈ **61 Mbit/s** | 单连接只能测出 6.7 M，是 TCP 窗口限制，不是带宽 |
+| 物理口 | 100 Mbps 全双工 | `ethtool wan` 协商结果，与 75/61 吻合 |
 
-1. LuCI → 网络 → SQM QoS，改 Download / Upload，点「应用」；
-2. 或者命令行：
+两个数都取了实测值 × 0.92（cake 控延迟要留出的余量）。
+
+**这一条踩过坑，必须记住**：曾经沿用更早一次「12 Mbps」的旧测量填 `10500 / 3000`，等于把 75M 的下行压到 1/7、上行压到 1/20 —— 出口队列 4 小时丢 9.7 万包、`pk_delay` 峰值 64ms、cake 内存用满 4.3MB/4MB，表现就是远程桌面（UU）卡成幻灯片。改成 70000/56000 后：下载 1.14 → 7.69 MB/s，满速下载 ping 只涨 1.4ms，丢包 97327 → 3。
+
+**换线路 / 换套餐后必须重测，别沿用文档里的数字：**
 
 ```sh
-uci set sqm.@queue[0].download='10500'
-uci set sqm.@queue[0].upload='3000'
+# 1) 先停整形，测裸带宽（不停的话测出来的就是设定值）
+uci set sqm.@queue[0].enabled='0'; uci commit sqm; /etc/init.d/sqm restart
+# 下行：拉一个大文件，看稳态 MB/s
+curl -o /dev/null https://mirrors.ustc.edu.cn/openwrt/releases/25.12.6/targets/ramips/mt7621/openwrt-25.12.6-ramips-mt7621-rootfs.tar.gz
+# 上行：单连接测不准，用 6 路并发（mwan3 / 多线程工具都行），总计就是真实上行
+# 2) 满速下载时 ping 一下网关外，确认 bufferbloat：+5ms 以内算好
+ping -c 30 223.5.5.5
+# 3) 恢复整形并填新值（实测 × 0.92）
+uci set sqm.@queue[0].enabled='1'
+uci set sqm.@queue[0].download='70000'
+uci set sqm.@queue[0].upload='56000'
 uci commit sqm && /etc/init.d/sqm restart
 ```
+
+改起来**不用重编固件**，LuCI → 网络 → SQM QoS 里也能改，点「应用」立即生效。
 
 确认真的在整形：
 
@@ -114,7 +133,7 @@ tc -s qdisc show dev ifb4wan    # 下行整形跑在 ifb 上
 logread -e sqm | tail
 ```
 
-跑一次测速，看 `tc -s qdisc show dev wan` 里 `Sent` 的增速 ≈ 设定的 upload，说明整形在工作。
+跑一次测速，看 `tc -s qdisc show dev wan` 里 `Sent` 的增速 ≈ 设定的 upload，说明整形在工作。`tc -s qdisc show dev wan` 里 `dropped` 应该是**个位数或零**；如果几小时就上万，说明 download/upload 填大了，或者上游本来就在丢。
 
 不想用了：LuCI 里取消「Enable this SQM instance」，或 `uci set sqm.@queue[0].enabled='0'; uci commit sqm`。
 
@@ -205,6 +224,31 @@ scp root@172.20.0.1:/etc/config/network .
 - 默认落在 `/root`（overlay），**大文件放 `/tmp`**（内存盘，重启没）。别把固件往 `/root` 里塞，25MB 的 overlay 顶不住。
 - `/usr/lib/sftp-server` 只在 overlay 占 113 KB；刷了带这个包的固件后它就在 squashfs 里，不占。
 
+## 界面：中文 + argon 主题
+
+语言固定 `zh_cn`（不依赖浏览器 Accept-Language），主题用 argon（左侧竖排菜单）。整套文件都在 `files/` 里，直接进 squashfs。
+
+**argon 3.x 是「四件套」，只搬一层就会挂，而且编译期看不出来：**
+
+| 层 | 文件 | 缺了会怎样 |
+|---|---|---|
+| 模板 | `usr/share/ucode/luci/template/themes/argon/*.ut` | 主题不生效，回落默认样式 |
+| ucode 模块 | `usr/share/ucode/luci/argon-palette.uc`、`argon-branding.uc` | **整个 web 500**：`Unable to compile head.ut: Unable to resolve path for module 'luci.argon-palette'` |
+| 前端 JS | `www/luci-static/resources/menu-argon.js` / `argon-compat.js` / `argon-appearance.js` / `argon-overview.js` / `argon-sshkeys.js` / `argon-graphs.js` | 首页 200 但**左侧菜单整块空白**（菜单是 JS 填进 `#mainmenu` 的，js 404 就永远 `display:none`） |
+| rpcd 后端 | `usr/libexec/rpcd/luci.argon*` + `usr/share/rpcd/acl.d/luci-theme-argon.json` | 主题设置页读不到参数 |
+
+这两个坑都是真踩过的。现在 CI 有静态闸：扫所有 `.ut` 里的 `from 'luci.xxx'` 和 `L.require('argon-*' | 'menu-argon')`，对应文件不在 `files/` 里就直接构建失败。
+
+**万一还是开不了页面**（SSH 还能进的情况下），切回官方主题救急：
+
+```sh
+uci set luci.main.mediaurlbase='/luci-static/bootstrap'
+uci delete luci.themes.Argon
+uci commit luci && /etc/init.d/uhttpd restart
+```
+
+刷完机 root 是空密码时，`99-newifi-custom` 会自动设成 `password`（已有密码不动），并显式打开 dropbear 的密码认证——否则空密码 + 主题报错会同时堵死 SSH 和 LuCI 两个入口。
+
 ## 验证
 
 ```sh
@@ -226,6 +270,9 @@ curl -x http://cl:cl@172.20.0.1:1089 -sI https://www.baidu.com | head -1
 files/etc/uci-defaults/99-newifi-custom   首启一次性配置
 files/etc/init.d/vlmcsd                   KMS 服务
 files/etc/init.d/proxy-mipsle             代理服务（下载 + 运行合一，二进制不落闪存）
+files/usr/share/ucode/luci/*.uc           argon 主题的 ucode 模块（palette / branding）
+files/www/luci-static/resources/*.js      argon 主题的前端（菜单渲染、明暗模式、状态页卡片）
+files/usr/libexec/rpcd/luci.argon*        argon 主题的 rpcd 后端
 files/usr/bin/vlmcsd                      CI 里现编，不进版本库（.gitignore）
 ```
 

@@ -1,2 +1,1 @@
-# CI 里用 SDK 现编出来再塞进 files/，不进版本库
-files/usr/bin/vlmcsd
+.workbuddy/

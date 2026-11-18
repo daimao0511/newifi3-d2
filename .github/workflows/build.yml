@@ -58,6 +58,24 @@ jobs:
           if [ -e files/etc/vlmcsd.kmd ]; then
             echo "!! 不该再有 vlmcsd.kmd（KMS 数据已内嵌）"; exit 1
           fi
+          # argon 主题是「模板 .ut + ucode 模块 + 前端 JS + rpcd」四件套，
+          # 少任何一层编译期都发现不了，刷完才炸（吃过两次：palette 缺失 → web 500，
+          # menu-argon.js 缺失 → 左侧菜单整块空白）。这里做静态闭合检查。
+          for ut in $(find files -name '*.ut'); do
+            for m in $(grep -oE "from 'luci\.[a-z0-9_-]+'" "$ut" | sed "s/from 'luci\.//; s/'//" | sort -u); do
+              case "$m" in
+                core|util|sys|fs|ip|jsonc|debug|http|template|luci) continue ;;
+              esac
+              test -f "files/usr/share/ucode/luci/$m.uc" \
+                || { echo "!! $ut 引用 luci.$m，但缺 files/usr/share/ucode/luci/$m.uc"; exit 1; }
+              echo "模板 OK: $ut -> luci.$m"
+            done
+            for j in $(grep -oE "L\.require\('(menu-)?argon[a-z-]*'\)" "$ut" | sed "s/L\.require('//; s/')//" | sort -u); do
+              test -f "files/www/luci-static/resources/$j.js" \
+                || { echo "!! $ut 引用 $j，但缺 files/www/luci-static/resources/$j.js"; exit 1; }
+              echo "模板 OK: $ut -> $j.js"
+            done
+          done
 
       - name: 下载 OpenWrt SDK（要里面的 musl 交叉工具链）
         run: |
@@ -174,12 +192,21 @@ jobs:
       - name: 编译固件
         run: |
           set -euxo pipefail
-          exec > >(tee -a /tmp/build.log) 2>&1
           cd "$IB_DIR"
+          # 用管道 tee，不要用 exec > >(tee)：进程替换里的 tee 在 step 结束会被
+          # SIGTERM 打断，缓冲区直接丢，失败时什么都抓不到（踩过一次）。
+          set +e
           make image \
             PROFILE="$PROFILE" \
             PACKAGES="$PKGS" \
-            FILES="$GITHUB_WORKSPACE/files"
+            FILES="$GITHUB_WORKSPACE/files" 2>&1 | tee /tmp/image.log
+          rc=${PIPESTATUS[0]}
+          cat /tmp/image.log >> /tmp/build.log
+          if [ "$rc" -ne 0 ]; then
+            echo "!! make image 退出码 $rc"
+            grep -iE 'error|not found|conflict|cannot|failed|Unknown package|unsatisfied' /tmp/image.log | tail -40
+            exit "$rc"
+          fi
           OUT="bin/targets/${TARGET}/${SUBTARGET}"
           echo "--- 产物 ---"
           ls -lh "$OUT"/*.bin
@@ -199,6 +226,14 @@ jobs:
                    usr/lib/lua/luci/i18n/firewall.zh-cn.lmo \
                    www/luci-static/argon/css/cascade.css \
                    usr/share/ucode/luci/template/themes/argon/head.ut \
+                   usr/share/ucode/luci/argon-palette.uc \
+                   usr/share/ucode/luci/argon-branding.uc \
+                   www/luci-static/resources/menu-argon.js \
+                   www/luci-static/resources/argon-compat.js \
+                   www/luci-static/resources/argon-appearance.js \
+                   www/luci-static/resources/argon-overview.js \
+                   www/luci-static/resources/argon-sshkeys.js \
+                   www/luci-static/resources/argon-graphs.js \
                    usr/libexec/rpcd/luci.argon \
                    etc/init.d/sqm usr/lib/sqm/piece_of_cake.qos \
                    etc/init.d/sysntpd usr/sbin/ntpd \
@@ -278,9 +313,12 @@ jobs:
             echo '```'
             if [ "${{ job.status }}" != "success" ]; then
               echo
-              echo "失败日志尾部："
+              echo "失败日志（关键行 + 尾部）："
               echo '```'
-              tail -c 40000 /tmp/build.log 2>/dev/null || echo "(没有抓到最后一次重定向之前的日志)"
+              grep -inE 'error|not found|conflict|cannot|failed|Unknown package|unsatisfied|No such file' /tmp/build.log 2>/dev/null | tail -40 \
+                || echo "(没匹配到关键字)"
+              echo '--- 尾部 200 行 ---'
+              tail -200 /tmp/build.log 2>/dev/null || echo "(没有 build.log)"
               echo '```'
             fi
           } > /tmp/comment.txt

@@ -109,19 +109,21 @@ if [ -x /etc/init.d/vlmcsd ]; then
 fi
 
 # ---------------- SQM 智能整形（cake） ----------------
-# 这条线上游实测 ~12 Mbps（1792 KB/s 级），而且会在 4~12 Mbps 之间抖。
+# 这条线实测下行 75 Mbps / 上行 61 Mbps（WAN 百兆协商，跑不满千兆），
+# 之前按 12 Mbps 填 10500/3000 是照老线路估的，把 75M 的线硬压成 10.5M。
 # cake 不提速，它治的是 bufferbloat：满速下载时延迟从几百毫秒压到十几毫秒，
 # 网页还能开、语音不掉。代价是峰值带宽被压到设定值的 85% 左右。
 #
 # download / upload 单位是 kbit/s，各自填「实测值 × 0.9」：
+#   实测 75000 → 填 70000；实测 61000 → 填 56000（留一点余量给 ATM 开销和抖动）
 #   填大了 → 整形器不触发，等于没开；填小了 → 白丢带宽。
 # 改这里不如改界面：LuCI → 网络 → SQM QoS，改完点「应用」立即生效，不用重编固件。
 uci -q delete sqm.@queue[0]
 uci add sqm queue >/dev/null
 uci set sqm.@queue[-1].enabled='1'
 uci set sqm.@queue[-1].interface='wan'
-uci set sqm.@queue[-1].download='10500'
-uci set sqm.@queue[-1].upload='3000'
+uci set sqm.@queue[-1].download='70000'
+uci set sqm.@queue[-1].upload='56000'
 # piece_of_cake：进出两个方向都挂 cake，不做 DSCP 分类，最简单也最稳
 uci set sqm.@queue[-1].script='piece_of_cake.qos'
 uci set sqm.@queue[-1].qdisc='cake'
@@ -187,5 +189,18 @@ done
 if [ -f /etc/opkg/distfeeds.conf ]; then
 	sed -i 's#https://downloads.openwrt.org#https://mirrors.ustc.edu.cn/openwrt#' /etc/opkg/distfeeds.conf
 fi
+
+# ---------------- root 密码兜底 / SSH 登录 ----------------
+# 刷完机 root 默认空密码，dropbear 直接拒绝登录；万一 LuCI 又因为主题/模板
+# 报错打不开，就彻底没有入口了（只能上 breed 重刷或拆机）。
+# 这里只在密码确实为空时设一个，已有密码一律不动，所以后续刷机默认保留原密码。
+ROOT_PASS='password'
+if ! grep -q '^root:[^!*]' /etc/shadow 2>/dev/null; then
+	printf '%s\n%s\n' "$ROOT_PASS" "$ROOT_PASS" | passwd root >/dev/null 2>&1 \
+		&& echo "root password set to default ($ROOT_PASS)"
+fi
+uci -q set dropbear.@dropbear[0].PasswordAuth='on'
+uci -q set dropbear.@dropbear[0].RootPasswordAuth='on'
+uci -q commit dropbear
 
 exit 0
