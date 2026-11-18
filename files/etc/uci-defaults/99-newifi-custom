@@ -109,21 +109,16 @@ if [ -x /etc/init.d/vlmcsd ]; then
 fi
 
 # ---------------- SQM 智能整形（cake） ----------------
-# 这条线实测下行 75 Mbps / 上行 61 Mbps（WAN 百兆协商，跑不满千兆），
-# 之前按 12 Mbps 填 10500/3000 是照老线路估的，把 75M 的线硬压成 10.5M。
-# cake 不提速，它治的是 bufferbloat：满速下载时延迟从几百毫秒压到十几毫秒，
-# 网页还能开、语音不掉。代价是峰值带宽被压到设定值的 85% 左右。
-#
-# download / upload 单位是 kbit/s，各自填「实测值 × 0.9」：
-#   实测 75000 → 填 70000；实测 61000 → 填 56000（留一点余量给 ATM 开销和抖动）
-#   填大了 → 整形器不触发，等于没开；填小了 → 白丢带宽。
+# 激进模式：按线路上限 100M 设（不是实测带宽），让 cake 基本不介入整形，
+# 只在满速时兜底压延迟。代价：bufferbloat 治理效果打折，延迟曲线比 70000/56000 差，
+# 换来的是峰值带宽跑满。延迟敏感（远程桌面/游戏）就调回实测 × 0.92。
 # 改这里不如改界面：LuCI → 网络 → SQM QoS，改完点「应用」立即生效，不用重编固件。
 uci -q delete sqm.@queue[0]
 uci add sqm queue >/dev/null
 uci set sqm.@queue[-1].enabled='1'
 uci set sqm.@queue[-1].interface='wan'
-uci set sqm.@queue[-1].download='70000'
-uci set sqm.@queue[-1].upload='56000'
+uci set sqm.@queue[-1].download='100000'
+uci set sqm.@queue[-1].upload='100000'
 # piece_of_cake：进出两个方向都挂 cake，不做 DSCP 分类，最简单也最稳
 uci set sqm.@queue[-1].script='piece_of_cake.qos'
 uci set sqm.@queue[-1].qdisc='cake'

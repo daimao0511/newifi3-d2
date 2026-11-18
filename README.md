@@ -50,7 +50,7 @@ OpenWrt **25.12.6**（当前 stable）+ Image Builder，Newifi-D2（D-Team / MT7
 | DNS | `kms.lan` → `172.20.0.1` |
 | 代理服务 | `/etc/init.d/proxy-mipsle`，开机从 NAS 拉到 `/tmp` 跑，`0.0.0.0:1089` |
 | KMS 服务 | `/etc/init.d/vlmcsd`，`/usr/bin/vlmcsd -D -e -P 1688` |
-| SQM 整形 | `wan` 上跑 cake，下行 `70000` / 上行 `56000` kbit/s（实测 75M/61M × 0.92），进出双向 |
+| SQM 整形 | `wan` 上跑 cake，下行 `100000` / 上行 `100000` kbit/s（激进模式，按线路上限 100M 设），进出双向 |
 | NTP 服务端 | `enable_server=1`，上游换 `ntp.aliyun.com` / `ntp.tencent.com` / `ntp.ntsc.ac.cn` |
 | wifi | 关掉（驱动本来也没装） |
 | root 密码 | 空密码时设成 `password`（已有密码不覆盖），dropbear 显式开密码认证 |
@@ -94,7 +94,11 @@ done
 | **大于**真实带宽 | 整形器不触发，等于没开，延迟该炸还是炸 |
 | **小于**真实带宽 | 不丢包但峰值被压住，延迟确实变好 |
 
-出厂预设 `download=70000` / `upload=56000`（kbit/s），来自这台机器上的实测：
+出厂预设 `download=100000` / `upload=100000`（kbit/s）——**激进模式**：直接按 WAN
+百兆协商的上限设，等于让 cake 平时只挂名、基本不介入，峰值带宽完全跑满。
+代价是 bufferbloat 治理效果打折：满速下载时延迟压不到十几毫秒那个水平了。
+
+这台机器的实测基线（调回保守值时用）：
 
 | 项 | 实测 | 依据 |
 |---|---|---|
@@ -102,7 +106,14 @@ done
 | 上行 | 6 路并发 7.6 MB/s ≈ **61 Mbit/s** | 单连接只能测出 6.7 M，是 TCP 窗口限制，不是带宽 |
 | 物理口 | 100 Mbps 全双工 | `ethtool wan` 协商结果，与 75/61 吻合 |
 
-两个数都取了实测值 × 0.92（cake 控延迟要留出的余量）。
+两种填法的取舍：
+
+| 填法 | 峰值带宽 | 满速时延迟 |
+|---|---|---|
+| `100000 / 100000`（当前，激进） | 完全跑满 | bufferbloat 回来，延迟涨明显 |
+| `70000 / 56000`（实测 × 0.92，保守） | 峰值被压到 ~92% | ping 只涨 1~2ms，远程桌面/游戏丝滑 |
+
+延迟敏感（远程桌面 UU / 游戏）就把值调回 70000/56000；只要吞吐就是现在的 100000/100000。
 
 **这一条踩过坑，必须记住**：曾经沿用更早一次「12 Mbps」的旧测量填 `10500 / 3000`，等于把 75M 的下行压到 1/7、上行压到 1/20 —— 出口队列 4 小时丢 9.7 万包、`pk_delay` 峰值 64ms、cake 内存用满 4.3MB/4MB，表现就是远程桌面（UU）卡成幻灯片。改成 70000/56000 后：下载 1.14 → 7.69 MB/s，满速下载 ping 只涨 1.4ms，丢包 97327 → 3。
 
@@ -116,10 +127,10 @@ curl -o /dev/null https://mirrors.ustc.edu.cn/openwrt/releases/25.12.6/targets/r
 # 上行：单连接测不准，用 6 路并发（mwan3 / 多线程工具都行），总计就是真实上行
 # 2) 满速下载时 ping 一下网关外，确认 bufferbloat：+5ms 以内算好
 ping -c 30 223.5.5.5
-# 3) 恢复整形并填新值（实测 × 0.92）
+# 3) 恢复整形并填新值（吞吐优先填 100000/100000，延迟优先填 70000/56000）
 uci set sqm.@queue[0].enabled='1'
-uci set sqm.@queue[0].download='70000'
-uci set sqm.@queue[0].upload='56000'
+uci set sqm.@queue[0].download='100000'
+uci set sqm.@queue[0].upload='100000'
 uci commit sqm && /etc/init.d/sqm restart
 ```
 
